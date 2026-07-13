@@ -62,7 +62,7 @@ export async function execute(input: z.infer<typeof inputShape>) {
   const payload = inputShape.parse(input);
   const owner = payload.owner ?? env.GITHUB_DEFAULT_OWNER;
   const repo = payload.repo ?? env.GITHUB_DEFAULT_REPO;
-  const token = process.env.GITHUB_TOKEN;
+  const token = process.env["GITHUB_TOKEN"];
 
   if (!token) {
     throw new Error("GITHUB_TOKEN not configured");

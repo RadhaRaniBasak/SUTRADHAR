@@ -15,9 +15,10 @@ export class ExternalApiError extends Error {
     super(params.message, { cause: params.cause });
     this.name = "ExternalApiError";
     this.provider = params.provider;
-    this.statusCode = params.statusCode;
     this.retryable = params.retryable ?? false;
-    this.requestId = params.requestId;
+
+    if (params.statusCode !== undefined) this.statusCode = params.statusCode;
+    if (params.requestId !== undefined) this.requestId = params.requestId;
   }
 }
 

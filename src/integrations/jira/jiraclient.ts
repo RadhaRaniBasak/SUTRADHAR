@@ -1,96 +1,61 @@
-import axios, { type AxiosInstance, isAxiosError } from "axios";
+import axios from "axios";
 import { env } from "../../config/env.js";
 import { withRetry } from "../../utils/retry.js";
-import { err, ok, type Result } from "../../utils/result.js";
-import type { IntegrationError } from "../../types/domain.types.js";
 
-type CreateJiraIssueInput = {
-  projectKey: string;
-  summary: string;
-  issueType: string;
-  description: string;
-};
+function getJiraConfig(): { baseUrl: string; username: string; password: string } {
+  const baseUrl = env.JIRA_BASE_URL;
+  const username = env.JIRA_EMAIL;
+  const password = env.JIRA_API_TOKEN;
 
-type CreateJiraIssueResult = {
-  id: string;
-  key: string;
-  url: string;
-};
-
-type JiraErrorResponseBody = {
-  errorMessages?: string[];
-  errors?: Record<string, string>;
-};
-
-const jiraHttp: AxiosInstance = axios.create({
-  baseURL: env.JIRA_BASE_URL,
-  timeout: 10_000,
-  auth: {
-    username: env.JIRA_EMAIL,
-    password: env.JIRA_API_TOKEN,
-  },
-  headers: {
-    "Content-Type": "application/json",
-    Accept: "application/json",
-  },
-});
-
-interface JiraCreateIssueResponse {
-  id: string;
-  key: string;
-  self: string;
-}
-
-function toIntegrationError(error: unknown): IntegrationError {
-  if (isAxiosError<JiraErrorResponseBody>(error)) {
-    const status = error.response?.status;
-    const body = error.response?.data;
-    const messages = [
-      ...(body?.errorMessages ?? []),
-      ...(body?.errors ? Object.entries(body.errors).map(([field, msg]) => `${field}: ${msg}`) : []),
-    ];
-    return {
-      provider: "jira",
-      message: messages.length > 0 ? messages.join("; ") : error.message,
-      ...(status !== undefined ? { statusCode: status } : {}),
-      retryable: status === undefined || status === 429 || status >= 500,
-    };
+  if (!baseUrl || !username || !password) {
+    throw new Error("Missing Jira config: JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN");
   }
+
   return {
-    provider: "jira",
-    message: error instanceof Error ? error.message : "Unknown Jira integration error",
-    retryable: false,
+    baseUrl: baseUrl.replace(/\/$/, ""),
+    username,
+    password,
   };
 }
 
-export async function createIssue(input: CreateJiraIssueInput): Promise<Result<CreateJiraIssueResult, IntegrationError>> {
-  try {
-    const response = await withRetry(() =>
-      jiraHttp.post<JiraCreateIssueResponse>("/rest/api/3/issue", {
-        fields: {
-          project: { key: input.projectKey },
-          summary: input.summary,
-          issuetype: { name: input.issueType },
-          description: {
-            type: "doc",
-            version: 1,
-            content: [
-              {
-                type: "paragraph",
-                content: [{ type: "text", text: input.description }],
-              },
-            ],
+export async function createJiraIssue(input: {
+  projectKey: string;
+  summary: string;
+  description?: string;
+  issueType?: string;
+}) {
+  const cfg = getJiraConfig();
+
+  return withRetry(
+    async () => {
+      const response = await axios.post(
+        `${cfg.baseUrl}/rest/api/3/issue`,
+        {
+          fields: {
+            project: { key: input.projectKey },
+            summary: input.summary,
+            description: input.description ?? "",
+            issuetype: { name: input.issueType ?? "Task" },
           },
         },
-      }),
-    );
-
-    return ok({
-      id: response.data.id,
-      key: response.data.key,
-      url: `${env.JIRA_BASE_URL}/browse/${response.data.key}`,
-    });
-  } catch (error) {
-    return err(toIntegrationError(error));
-  }
+        {
+          auth: {
+            username: cfg.username,
+            password: cfg.password,
+          },
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+        },
+      );
+      return response.data;
+    },
+    {
+      maxAttempts: 3,
+      baseDelayMs: 300,
+      maxDelayMs: 2000,
+      shouldRetry: () => true,
+    },
+  );
 }
