@@ -116,11 +116,11 @@ For your gallery, upload:
 ---
 
 ## 🔮 Future Improvements
-
+-INTEGRATE GIRA, LINEAR, NOTION 
 - Add more advanced feature modules
 - Improve test coverage
 - Enhance UX and documentation depth
-- Add deployment/live demo link
+  
 
 ---
 
