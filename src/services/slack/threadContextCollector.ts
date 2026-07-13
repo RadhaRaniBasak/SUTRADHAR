@@ -1,109 +1,60 @@
-import { ErrorCode, type WebAPIPlatformError } from "@slack/web-api";
 import { slackClient } from "./slackClient.js";
 import { logger } from "../../config/logger.js";
-import type { NormalizedThreadMessage, ThreadContext } from "../../types/slack.types.js";
 
-const MAX_PAGES = 10;
-const PAGE_SIZE = 200;
+const PAGE_SIZE = 100;
+const MAX_PAGES = 4;
+const TARGET_HUMAN_MESSAGES = 25;
 
-type ConversationsRepliesResult = Awaited<ReturnType<typeof slackClient.conversations.replies>>;
-type RawMessage = NonNullable<ConversationsRepliesResult["messages"]>[number] & { subtype?: string };
+export class ThreadFetchError extends Error {}
 
-export class ThreadFetchError extends Error {
-  constructor(
-    message: string,
-    public readonly slackErrorCode: string,
-    public readonly channelId: string,
-    public readonly threadTs: string,
-  ) {
-    super(message);
-    this.name = "ThreadFetchError";
-  }
-}
-
-function isWebAPIPlatformError(error: unknown): error is WebAPIPlatformError {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code: unknown }).code === ErrorCode.PlatformError
-  );
-}
-
-function hasTimestamp(message: RawMessage): message is RawMessage & { ts: string } {
-  return typeof message.ts === "string" && message.ts.length > 0;
-}
-
-function normalizeMessage(message: RawMessage & { ts: string }): NormalizedThreadMessage {
-  const isBot = Boolean(message.bot_id) || message.subtype === "bot_message";
-  const userId = message.user ?? (message.bot_id ? `bot:${message.bot_id}` : "unknown");
-
-  return {
-    userId,
-    text: message.text ?? "",
-    timestamp: message.ts,
-    isBot,
-  };
-}
-
-export interface FetchThreadContextParams {
+export async function fetchThreadContext(params: {
   channelId: string;
   threadTs: string;
   triggeringEventId: string;
-  triggeringUserId: string;
-}
+  triggeringUserId?: string;
+}) {
+  const messages: Array<{ userId?: string; text: string; timestamp: string; isBot: boolean }> = [];
+  let cursor: string | undefined = undefined;
 
-export async function fetchThreadContext(params: FetchThreadContextParams): Promise<ThreadContext> {
-  const { channelId, threadTs, triggeringEventId, triggeringUserId } = params;
-  const rawMessages: RawMessage[] = [];
-  let cursor: string | undefined;
-  let pageCount = 0;
+  for (let page = 1; page <= MAX_PAGES; page += 1) {
+    const res = await slackClient.conversations.replies({
+      channel: params.channelId,
+      ts: params.threadTs,
+      cursor,
+      limit: PAGE_SIZE,
+      inclusive: true,
+    });
 
-  do {
-    let response: ConversationsRepliesResult;
-    try {
-      response = await slackClient.conversations.replies({
-        channel: channelId,
-        ts: threadTs,
-        limit: PAGE_SIZE,
-        inclusive: true,
-        ...(cursor ? { cursor } : {}),
-      });
-    } catch (error) {
-      if (isWebAPIPlatformError(error)) {
-        throw new ThreadFetchError(
-          `Slack rejected conversations.replies: ${error.data.error}`,
-          error.data.error,
-          channelId,
-          threadTs,
-        );
-      }
-      throw error;
-    }
+    const chunk = (res.messages ?? []).map((m) => ({
+      userId: m.user,
+      text: m.text ?? "",
+      timestamp: m.ts ?? "",
+      isBot: Boolean(m.bot_id),
+    }));
 
-    rawMessages.push(...(response.messages ?? []));
-    cursor = response.response_metadata?.next_cursor || undefined;
-    pageCount += 1;
+    messages.push(...chunk);
 
-    if (pageCount >= MAX_PAGES && cursor) {
-      logger.warn(
-        { channelId, threadTs, pageCount, messageCount: rawMessages.length },
-        "Thread pagination cap reached; truncating context",
-      );
-      break;
-    }
-  } while (cursor);
+    const humanCount = messages.filter((m) => !m.isBot && m.text.trim().length > 0).length;
+    if (humanCount >= TARGET_HUMAN_MESSAGES) break;
 
-  const messages = rawMessages
-    .filter(hasTimestamp)
-    .map(normalizeMessage)
-    .sort((a, b) => Number.parseFloat(a.timestamp) - Number.parseFloat(b.timestamp));
+    cursor = res.response_metadata?.next_cursor || undefined;
+    if (!cursor) break;
+  }
+
+  logger.info(
+    {
+      channelId: params.channelId,
+      threadTs: params.threadTs,
+      fetchedMessages: messages.length,
+    },
+    "Fetched thread context",
+  );
 
   return {
-    channelId,
-    threadTs,
-    triggeringEventId,
-    triggeringUserId,
+    channelId: params.channelId,
+    threadTs: params.threadTs,
+    triggeringEventId: params.triggeringEventId,
+    triggeringUserId: params.triggeringUserId ?? "",
     messages,
   };
 }

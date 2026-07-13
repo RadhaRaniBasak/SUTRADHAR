@@ -1,52 +1,32 @@
-import { groqClient } from "../../integrations/groq/index.js";
-import pino from "pino";
-import type { GroqMessage } from "../../integrations/groq/types.js";
+import { createGroqChatCompletion } from "../../integrations/groq/groqClient.js";
+import { logger } from "../../config/logger.js";
 
-const logger = pino();
+export type GroqHandlerResult =
+  | { ok: true; text: string }
+  | { ok: false; reason: string };
 
-export async function handleGroqRequest(
-  userMessage: string,
-  conversationHistory: GroqMessage[] = []
-): Promise<string | null> {
+export async function handleGroqRequest(messages: Array<{ role: "system" | "user" | "assistant"; content: string }>): Promise<GroqHandlerResult> {
   try {
-    const messages: GroqMessage[] = [
-      ...conversationHistory,
-      { role: "user", content: userMessage },
-    ];
+    const response = await createGroqChatCompletion({
+      model: "llama-3.1-8b-instant",
+      messages,
+      temperature: 0.2,
+    });
 
-    logger.info({ userMessage }, "🚀 Starting Groq request");
-
-    if (!groqClient.isConfigured()) {
-      logger.error("❌ Groq API key not configured");
-      return null;
+    const text = response.choices[0]?.message?.content?.trim() ?? "";
+    if (!text) {
+      return { ok: false, reason: "empty_completion" };
     }
 
-    logger.info("📤 Calling Groq API...");
-    const response = await groqClient.chat(messages);
-    
-    logger.info(
-      { tokensUsed: response.usage.total_tokens },
-      "📥 Groq response received"
-    );
-
-    const reply = response.choices[0]?.message?.content;
-
-    if (!reply) {
-      logger.warn("⚠️ Groq returned empty response");
-      return null;
-    }
-
-    logger.info(
-      { replyLength: reply.length },
-      "✅ Groq request successful"
-    );
-    
-    return reply;
+    return { ok: true, text };
   } catch (error) {
     logger.error(
-      { err: error instanceof Error ? error.message : String(error) },
-      "❌ Groq request failed"
+      {
+        err: error,
+        provider: "groq",
+      },
+      "Groq request failed",
     );
-    return null;
+    return { ok: false, reason: "groq_error" };
   }
 }

@@ -1,23 +1,13 @@
-import { groqClient } from "../src/integrations/groq/index.js";
+import { describe, it, expect } from "vitest";
+import { groqClient } from "../src/integrations/groq/groqClient.js";
 
-async function testGroqAPI() {
-  try {
-    console.log("Testing Groq API...");
-    
-    if (!groqClient.isConfigured()) {
-      console.error("❌ Groq API key not configured");
-      return;
-    }
+describe("groq client shape", () => {
+  it("exposes required methods", () => {
+    expect(typeof groqClient.chat).toBe("function");
+    expect(typeof groqClient.isConfigured).toBe("function");
+  });
 
-    const response = await groqClient.chat([
-      { role: "user", content: "Say hello in one sentence" }
-    ]);
-
-    console.log("✅ Groq API is working!");
-    console.log("Response:", response.choices[0]?.message?.content);
-  } catch (error) {
-    console.error("❌ Groq API test failed:", error);
-  }
-}
-
-testGroqAPI();
+  it("isConfigured returns boolean", () => {
+    expect(typeof groqClient.isConfigured()).toBe("boolean");
+  });
+});

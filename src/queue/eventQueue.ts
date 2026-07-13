@@ -1,42 +1,30 @@
-import { Queue, type RedisOptions } from "bullmq";
-import { env } from "../config/env.js";
-import type { SlackEventCallbackPayload } from "../types/slack.types.js";
+import { Queue } from "bullmq";
+import type { SlackEventCallback } from "../server/schemas/slackEvents.js";
+import { redisConnection } from "./redisConnection.js";
+import { logger } from "../config/logger.js";
 
-export const QUEUE_NAME = "slack-mention-events";
-const JOB_NAME = "process-mention";
-
-export function parseRedisConnectionOptions(redisUrl: string): RedisOptions {
-  const parsed = new URL(redisUrl);
-  const options: RedisOptions = {
-    host: parsed.hostname,
-    port: parsed.port ? Number.parseInt(parsed.port, 10) : 6379,
-    maxRetriesPerRequest: null,
-  };
-  if (parsed.password) {
-    options.password = parsed.password;
-  }
-  if (parsed.protocol === "rediss:") {
-    options.tls = {};
-  }
-  return options;
-}
-
-export const eventQueue = new Queue<SlackEventCallbackPayload, void, typeof JOB_NAME>(QUEUE_NAME, {
-  connection: parseRedisConnectionOptions(env.REDIS_URL),
+export const eventQueue = new Queue<SlackEventCallback>("slack-events", {
+  connection: redisConnection,
   defaultJobOptions: {
     attempts: 3,
-    backoff: { type: "exponential", delay: 2000 },
-    removeOnComplete: { age: 60 * 60 * 24, count: 1000 },
-    removeOnFail: { age: 60 * 60 * 24 * 7 },
+    backoff: { type: "exponential", delay: 1000 },
+    removeOnComplete: 500,
+    removeOnFail: 1000,
   },
 });
 
-export async function enqueueSlackEvent(payload: SlackEventCallbackPayload): Promise<void> {
-  await eventQueue.add(JOB_NAME, payload, {
+const MAX_QUEUE_DEPTH = 2000;
+
+export async function enqueueSlackEvent(payload: SlackEventCallback): Promise<void> {
+  const counts = await eventQueue.getJobCounts("waiting", "active", "delayed");
+  const depth = (counts.waiting ?? 0) + (counts.active ?? 0) + (counts.delayed ?? 0);
+
+  if (depth > MAX_QUEUE_DEPTH) {
+    logger.warn({ depth, eventId: payload.event_id }, "Dropping Slack event due to backpressure");
+    return;
+  }
+
+  await eventQueue.add("event_callback", payload, {
     jobId: payload.event_id,
   });
-}
-
-export async function closeEventQueue(): Promise<void> {
-  await eventQueue.close();
 }

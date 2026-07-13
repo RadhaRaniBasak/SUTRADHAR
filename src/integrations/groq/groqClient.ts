@@ -1,54 +1,125 @@
+import { z } from "zod";
+import { withRetry } from "../../utils/retry.js";
+import { ExternalApiError, isTransientStatus } from "../../utils/http.js";
 import { env } from "../../config/env.js";
-import pino from "pino";
-import type { GroqMessage, GroqChatResponse } from "./types.js";
 
-const logger = pino();
+const GroqMessageSchema = z.object({
+  role: z.string(),
+  content: z.string().nullable().optional(),
+});
 
-class GroqClient {
-  private apiKey: string;
-  private baseURL = "https://api.groq.com/openai/v1";
+const GroqChoiceSchema = z.object({
+  index: z.number().optional(),
+  message: GroqMessageSchema,
+  finish_reason: z.string().nullable().optional(),
+});
 
-  constructor(apiKey: string) {
-    this.apiKey = apiKey;
-  }
+const GroqResponseSchema = z.object({
+  id: z.string().optional(),
+  object: z.string().optional(),
+  created: z.number().optional(),
+  model: z.string().optional(),
+  choices: z.array(GroqChoiceSchema).min(1),
+  usage: z
+    .object({
+      prompt_tokens: z.number().optional(),
+      completion_tokens: z.number().optional(),
+      total_tokens: z.number().optional(),
+    })
+    .optional(),
+});
 
-  isConfigured(): boolean {
-    return !!this.apiKey && this.apiKey.length > 0;
-  }
+export type GroqChatMessage = {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string;
+};
 
-  async chat(messages: GroqMessage[]): Promise<GroqChatResponse> {
-    if (!this.isConfigured()) {
-      throw new Error("Groq API key not configured");
-    }
+export type GroqChatParams = {
+  model: string;
+  messages: GroqChatMessage[];
+  temperature?: number;
+  max_tokens?: number;
+};
 
-    try {
-      const response = await fetch(`${this.baseURL}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${this.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
-          messages,
-          temperature: 0.7,
-          max_tokens: 1024,
-        }),
-      });
+export type GroqChatResult = z.infer<typeof GroqResponseSchema>;
 
-      if (!response.ok) {
-        const error = await response.text();
-        logger.error({ status: response.status, error }, "Groq API error");
-        throw new Error(`Groq API error: ${response.status} ${error}`);
-      }
+const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+const TIMEOUT_MS = 12000;
 
-      const data = (await response.json()) as GroqChatResponse;
-      return data;
-    } catch (error) {
-      logger.error({ error }, "Failed to call Groq API");
-      throw error;
-    }
-  }
+function isConfigured(): boolean {
+  return Boolean(env.GROQ_API_KEY && env.GROQ_API_KEY.trim().length > 0);
 }
 
-export const groqClient = new GroqClient(env.GROQ_API_KEY || "");
+export async function createGroqChatCompletion(params: GroqChatParams): Promise<GroqChatResult> {
+  if (!isConfigured()) {
+    throw new ExternalApiError({
+      provider: "groq",
+      message: "GROQ_API_KEY is not configured",
+      retryable: false,
+    });
+  }
+
+  return withRetry(
+    async (attempt) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+      try {
+        const res = await fetch(GROQ_URL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${env.GROQ_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(params),
+          signal: controller.signal,
+        });
+
+        const requestId = res.headers.get("x-request-id") ?? undefined;
+        const text = await res.text();
+        let parsed: unknown = {};
+        try {
+          parsed = text ? JSON.parse(text) : {};
+        } catch {
+          parsed = { raw: text };
+        }
+
+        if (!res.ok) {
+          throw new ExternalApiError({
+            provider: "groq",
+            message: `Groq error status=${res.status} attempt=${attempt}`,
+            statusCode: res.status,
+            retryable: isTransientStatus(res.status),
+            requestId,
+          });
+        }
+
+        return GroqResponseSchema.parse(parsed);
+      } catch (error) {
+        if (error instanceof ExternalApiError) throw error;
+
+        const isAbort = error instanceof Error && error.name === "AbortError";
+        throw new ExternalApiError({
+          provider: "groq",
+          message: isAbort ? "Groq request timed out" : "Groq request failed",
+          retryable: true,
+          cause: error,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+    {
+      maxAttempts: 3,
+      baseDelayMs: 300,
+      maxDelayMs: 2500,
+      jitterRatio: 0.25,
+      shouldRetry: (error) => error instanceof ExternalApiError && error.retryable,
+    },
+  );
+}
+
+export const groqClient = {
+  chat: createGroqChatCompletion,
+  isConfigured,
+};
