@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as createJiraIssueTool from "./tools/createJiraIssue.js";
 import * as createLinearIssueTool from "./tools/createLinearIssue.js";
 import * as createGithubIssueTool from "./tools/createGithubIssue.js";
+import * as upsertGithubFileTool from "./tools/upsertGithubFile.js";
 import * as insertNotionDocumentTool from "./tools/insertNotionDocument.js";
 
 export function registerAllTools(server: McpServer): void {
@@ -33,6 +34,16 @@ export function registerAllTools(server: McpServer): void {
       outputSchema: (createGithubIssueTool as any).outputShape,
     },
     (createGithubIssueTool as any).execute,
+  );
+
+  server.registerTool(
+    (upsertGithubFileTool as any).name,
+    {
+      description: (upsertGithubFileTool as any).description,
+      inputSchema: (upsertGithubFileTool as any).inputShape,
+      outputSchema: (upsertGithubFileTool as any).outputShape,
+    },
+    (upsertGithubFileTool as any).execute,
   );
 
   server.registerTool(

@@ -4,6 +4,8 @@ import { logger } from "../../config/logger.js";
 import { verifySlackSignature } from "../middleware/verifySlackSignature.js";
 import { enqueueSlackEvent } from "../../queue/eventQueue.js";
 import { isAppMentionEvent, type SlackEventsApiPayload } from "../../types/slack.types.js";
+import { handleGroqRequest } from "../../services/slack/groqHandler.js";
+import { slackClient } from "../../services/slack/slackClient.js";
 
 function parseRawBody(rawBody: string): SlackEventsApiPayload {
   try {
@@ -36,21 +38,43 @@ async function handleSlackEvent(request: FastifyRequest, reply: FastifyReply): P
   await reply.code(200).send({ ok: true });
 
   if (!isAppMentionEvent(payload.event)) {
+    logger.info("Event is not app_mention, ignoring");
     return;
   }
 
   if (payload.event.user === env.SLACK_BOT_USER_ID) {
+    logger.info("Ignoring own message");
     return;
   }
 
   try {
+    const userMessage = payload.event.text;
+    const channelId = payload.event.channel;
+    const threadTs = payload.event.thread_ts ?? payload.event.ts;
+
+    logger.info({ channel: channelId, message: userMessage }, "🚀 Processing message with Groq");
+
+    const groqReply = await handleGroqRequest(userMessage);
+
+    if (groqReply) {
+      await slackClient.chat.postMessage({
+        channel: channelId,
+        text: groqReply,
+        thread_ts: threadTs,
+      });
+      logger.info({ channel: channelId, thread: threadTs }, "✅ Groq response posted to Slack");
+    } else {
+      logger.warn({ channel: channelId }, "❌ Groq did not return a reply");
+      await slackClient.chat.postMessage({
+        channel: channelId,
+        text: "Sorry, I couldn't process your request at this time.",
+        thread_ts: threadTs,
+      });
+    }
+
     await enqueueSlackEvent(payload);
-    logger.info(
-      { eventId: payload.event_id, channel: payload.event.channel, thread: payload.event.thread_ts ?? payload.event.ts },
-      "Enqueued mention event for processing",
-    );
   } catch (error) {
-    logger.error({ err: error, eventId: payload.event_id }, "Failed to enqueue Slack event");
+    logger.error({ err: error, eventId: payload.event_id }, "Failed to process Slack event");
   }
 }
 

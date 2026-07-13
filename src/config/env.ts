@@ -1,62 +1,147 @@
-
-// Use require for dotenv to avoid TypeScript errors when @types/dotenv is not installed
-/* eslint-disable @typescript-eslint/no-var-requires */
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const dotenv = require("dotenv");
-  dotenv.config();
-} catch (e) {
-  // ignore if dotenv is not available in the environment
-}
-
+import "dotenv/config";
 import { z } from "zod";
- 
-const envSchema = z.object({
-  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
-  PORT: z.coerce.number().int().positive().default(3000),
-  LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
 
-  SLACK_SIGNING_SECRET: z.string().min(1, "SLACK_SIGNING_SECRET is required"),
-  SLACK_BOT_TOKEN: z.string().startsWith("xoxb-"),
-  SLACK_APP_TOKEN: z.string().startsWith("xapp-").optional(),
-  SLACK_BOT_USER_ID: z.string().min(1),
+const boolFromEnv = z
+  .string()
+  .optional()
+  .transform((v) => (v ?? "false").toLowerCase() === "true");
 
-  REDIS_URL: z.string().url(),
+const baseSchema = z.object({
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  LOG_LEVEL: z.string().default("info"),
+  LLM_MODEL: z.string().default("llama-3.3-70b-versatile"),
 
-  LLM_PROVIDER: z.literal("anthropic").default("anthropic"),
-  ANTHROPIC_API_KEY: z.string().min(1),
-  LLM_MODEL: z.string().default("claude-sonnet-4-6"),
+  REDIS_URL: z.string().min(1, "REDIS_URL is required"),
+  ENABLE_SLACK: boolFromEnv.default("false"),
+  ENABLE_GROQ: boolFromEnv.default("false"),
+  ENABLE_JIRA: boolFromEnv.default("false"),
+  ENABLE_LINEAR: boolFromEnv.default("false"),
+  ENABLE_GITHUB: boolFromEnv.default("false"),
+  ENABLE_NOTION: boolFromEnv.default("false"),
 
-  JIRA_BASE_URL: z.string().url(),
-  JIRA_EMAIL: z.string().email(),
-  JIRA_API_TOKEN: z.string().min(1),
-  JIRA_DEFAULT_PROJECT_KEY: z.string().min(1),
+  SLACK_SIGNING_SECRET: z.string().optional(),
+  SLACK_BOT_TOKEN: z.string().optional(),
+  SLACK_BOT_USER_ID: z.string().optional(),
 
-  LINEAR_API_KEY: z.string().min(1),
-  LINEAR_DEFAULT_TEAM_ID: z.string().min(1),
+  GROQ_API_KEY: z.string().optional(),
 
-  GITHUB_APP_ID: z.string().min(1),
-  GITHUB_PRIVATE_KEY: z.string().min(1),
-  GITHUB_INSTALLATION_ID: z.string().min(1),
-  GITHUB_DEFAULT_OWNER: z.string().min(1),
-  GITHUB_DEFAULT_REPO: z.string().min(1),
-  GITHUB_TOKEN: z.string().optional(),
+  JIRA_BASE_URL: z.string().optional(),
+  JIRA_EMAIL: z.string().optional(),
+  JIRA_API_TOKEN: z.string().optional(),
+  JIRA_DEFAULT_PROJECT_KEY: z.string().optional(),
 
-  NOTION_API_KEY: z.string().min(1),
-  NOTION_DEFAULT_DATABASE_ID: z.string().min(1),
+  LINEAR_API_KEY: z.string().optional(),
+  LINEAR_DEFAULT_TEAM_ID: z.string().optional(),
+
+  GITHUB_APP_ID: z.string().optional(),
+  GITHUB_PRIVATE_KEY: z.string().optional(),
+  GITHUB_INSTALLATION_ID: z.string().optional(),
+  GITHUB_DEFAULT_OWNER: z.string().optional(),
+  GITHUB_DEFAULT_REPO: z.string().optional(),
+
+  NOTION_API_KEY: z.string().optional(),
+  NOTION_DEFAULT_DATABASE_ID: z.string().optional(),
 });
 
-export type Env = z.infer<typeof envSchema>;
+function requireWhenEnabled(
+  enabled: boolean,
+  fields: Array<[key: string, value: string | undefined]>,
+  errors: string[],
+  label: string
+) {
+  if (!enabled) return;
+  for (const [key, value] of fields) {
+    if (!value || !String(value).trim()) {
+      errors.push(`${key}: Required when ${label}=true`);
+    }
+  }
+}
 
-function parseEnv(): Env {
-  const result = envSchema.safeParse(process.env);
-  if (!result.success) {
-    const formatted = result.error.issues
-      .map((issue) => `  - ${issue.path.join(".")}: ${issue.message}`)
+export function parseEnv() {
+  const parsed = baseSchema.safeParse(process.env);
+
+  if (!parsed.success) {
+    const formatted = parsed.error.issues
+      .map((i) => `- ${i.path.join(".")}: ${i.message}`)
       .join("\n");
     throw new Error(`Invalid environment configuration:\n${formatted}`);
   }
-  return result.data;
+
+  const env = parsed.data;
+  const conditionalErrors: string[] = [];
+
+  requireWhenEnabled(
+    env.ENABLE_SLACK,
+    [
+      ["SLACK_SIGNING_SECRET", env.SLACK_SIGNING_SECRET],
+      ["SLACK_BOT_TOKEN", env.SLACK_BOT_TOKEN],
+      ["SLACK_BOT_USER_ID", env.SLACK_BOT_USER_ID],
+    ],
+    conditionalErrors,
+    "ENABLE_SLACK"
+  );
+
+  requireWhenEnabled(
+    env.ENABLE_GROQ,
+    [["GROQ_API_KEY", env.GROQ_API_KEY]],
+    conditionalErrors,
+    "ENABLE_GROQ"
+  );
+
+  requireWhenEnabled(
+    env.ENABLE_JIRA,
+    [
+      ["JIRA_BASE_URL", env.JIRA_BASE_URL],
+      ["JIRA_EMAIL", env.JIRA_EMAIL],
+      ["JIRA_API_TOKEN", env.JIRA_API_TOKEN],
+      ["JIRA_DEFAULT_PROJECT_KEY", env.JIRA_DEFAULT_PROJECT_KEY],
+    ],
+    conditionalErrors,
+    "ENABLE_JIRA"
+  );
+
+  requireWhenEnabled(
+    env.ENABLE_LINEAR,
+    [
+      ["LINEAR_API_KEY", env.LINEAR_API_KEY],
+      ["LINEAR_DEFAULT_TEAM_ID", env.LINEAR_DEFAULT_TEAM_ID],
+    ],
+    conditionalErrors,
+    "ENABLE_LINEAR"
+  );
+
+  requireWhenEnabled(
+    env.ENABLE_GITHUB,
+    [
+      ["GITHUB_APP_ID", env.GITHUB_APP_ID],
+      ["GITHUB_PRIVATE_KEY", env.GITHUB_PRIVATE_KEY],
+      ["GITHUB_INSTALLATION_ID", env.GITHUB_INSTALLATION_ID],
+      ["GITHUB_DEFAULT_OWNER", env.GITHUB_DEFAULT_OWNER],
+      ["GITHUB_DEFAULT_REPO", env.GITHUB_DEFAULT_REPO],
+    ],
+    conditionalErrors,
+    "ENABLE_GITHUB"
+  );
+
+  requireWhenEnabled(
+    env.ENABLE_NOTION,
+    [
+      ["NOTION_API_KEY", env.NOTION_API_KEY],
+      ["NOTION_DEFAULT_DATABASE_ID", env.NOTION_DEFAULT_DATABASE_ID],
+    ],
+    conditionalErrors,
+    "ENABLE_NOTION"
+  );
+
+  if (conditionalErrors.length) {
+    throw new Error(
+      `Invalid environment configuration:\n${conditionalErrors
+        .map((e) => `- ${e}`)
+        .join("\n")}`
+    );
+  }
+
+  return env;
 }
 
 export const env = parseEnv();

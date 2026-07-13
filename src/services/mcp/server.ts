@@ -41,7 +41,15 @@ async function main(): Promise<void> {
 
   await server.connect(transport);
   logger.info(
-    { tools: ["create_jira_issue", "create_linear_issue", "create_github_issue", "insert_notion_document"] },
+    {
+      tools: [
+        "create_jira_issue",
+        "create_linear_issue",
+        "create_github_issue",
+        "upsert_github_file",
+        "insert_notion_document",
+      ],
+    },
     "MCP server connected over stdio",
   );
 }

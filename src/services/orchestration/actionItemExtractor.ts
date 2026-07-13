@@ -1,5 +1,4 @@
-import type Anthropic from "@anthropic-ai/sdk";
-import { anthropic, LLM_MAX_TOKENS } from "./llm/anthropicClient.js";
+import { createGroqChatCompletion, LLM_MAX_TOKENS, type GroqTool } from "./llm/groqClient.js";
 import { getMcpClient } from "../mcp/inProcessClient.js";
 import { env } from "../../config/env.js";
 import { logger } from "../../config/logger.js";
@@ -9,10 +8,6 @@ export interface PlannedToolCall {
   id: string;
   toolName: string;
   arguments: Record<string, unknown>;
-}
-
-function isToolUseBlock(block: Anthropic.ContentBlock): block is Anthropic.ToolUseBlock {
-  return block.type === "tool_use";
 }
 
 function formatThreadForPrompt(threadContext: ThreadContext): string {
@@ -53,29 +48,46 @@ export async function extractAndPlanDispatch(threadContext: ThreadContext): Prom
   const mcpClient = await getMcpClient();
   const { tools } = await mcpClient.listTools();
 
-  const anthropicTools: Anthropic.Tool[] = tools.map((tool) => ({
-    name: tool.name,
-    description: tool.description ?? "",
-    input_schema: tool.inputSchema as Anthropic.Tool.InputSchema,
+  const groqTools: GroqTool[] = tools.map((tool) => ({
+    type: "function",
+    function: {
+      name: tool.name,
+      description: tool.description ?? "",
+      parameters: tool.inputSchema as Record<string, unknown>,
+    },
   }));
 
-  const response = await anthropic.messages.create({
+  const response = await createGroqChatCompletion({
     model: env.LLM_MODEL,
-    max_tokens: LLM_MAX_TOKENS,
+    maxTokens: LLM_MAX_TOKENS,
     system: buildSystemPrompt(),
-    tools: anthropicTools,
-    tool_choice: { type: "auto" },
-    messages: [{ role: "user", content: `Here is the Slack thread:\n\n${threadText}` }],
+    tools: groqTools,
+    userMessage: `Here is the Slack thread:\n\n${threadText}`,
   });
 
-  const plannedCalls = response.content.filter(isToolUseBlock).map((block) => ({
-    id: block.id,
-    toolName: block.name,
-    arguments: (block.input ?? {}) as Record<string, unknown>,
-  }));
+  const toolCalls = response.choices[0]?.message.tool_calls ?? [];
+  const plannedCalls = toolCalls.map((call) => {
+    const callId = call.id ?? `call-${call.function.name}`;
+    const toolName = call.function.name;
+    let parsedArguments: Record<string, unknown> = {};
+
+    try {
+      parsedArguments = call.function.arguments
+        ? (JSON.parse(call.function.arguments) as Record<string, unknown>)
+        : {};
+    } catch (error) {
+      logger.warn({ err: error, toolName, callId }, "Invalid JSON in LLM tool call arguments");
+    }
+
+    return {
+      id: callId,
+      toolName,
+      arguments: parsedArguments,
+    };
+  });
 
   logger.info(
-    { threadTs: threadContext.threadTs, plannedCallCount: plannedCalls.length, stopReason: response.stop_reason },
+    { threadTs: threadContext.threadTs, plannedCallCount: plannedCalls.length, stopReason: response.choices[0]?.finish_reason },
     "LLM planned tool dispatches",
   );
 

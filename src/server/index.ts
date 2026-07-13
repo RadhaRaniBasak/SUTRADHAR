@@ -1,37 +1,56 @@
-import { buildApp } from "./app.js";
-import { env } from "../config/env.js";
+import "dotenv/config";
+import express from "express";
+import type { Request, Response } from "express";
 import { logger } from "../config/logger.js";
-import { closeEventQueue } from "../queue/eventQueue.js";
 
-async function main(): Promise<void> {
-  const app = buildApp();
+const app = express();
 
-  const shutdown = async (signal: string): Promise<void> => {
-    logger.info({ signal }, "Shutting down");
-    try {
-      await app.close();
-      await closeEventQueue();
-      logger.info("Shutdown complete");
-      process.exit(0);
-    } catch (error) {
-      logger.error({ err: error }, "Error during shutdown");
-      process.exit(1);
-    }
-  };
+// Parse JSON body
+app.use(express.json());
 
-  process.on("SIGTERM", () => void shutdown("SIGTERM"));
-  process.on("SIGINT", () => void shutdown("SIGINT"));
-  process.on("unhandledRejection", (reason) => {
-    logger.error({ err: reason }, "Unhandled promise rejection");
+// Basic health/root routes
+app.get("/", (_req: Request, res: Response) => {
+  res.status(200).json({
+    ok: true,
+    service: "meeting-to-action-mcp-bridge",
+    timestamp: new Date().toISOString(),
   });
+});
 
-  try {
-    await app.listen({ port: env.PORT, host: "0.0.0.0" });
-    logger.info({ port: env.PORT, env: env.NODE_ENV }, "Meeting-to-Action bridge listening");
-  } catch (error) {
-    logger.error({ err: error }, "Failed to start server");
-    process.exit(1);
+app.get("/health", (_req: Request, res: Response) => {
+  res.status(200).json({ ok: true });
+});
+
+// Slack Events endpoint (URL verification + event ack)
+app.post("/slack/events", (req: Request, res: Response) => {
+  const body = req.body;
+
+  // Slack URL verification challenge
+  if (body?.type === "url_verification" && body?.challenge) {
+    return res.status(200).json({ challenge: body.challenge });
   }
-}
 
-void main();
+  // Acknowledge all event callbacks quickly
+  if (body?.type === "event_callback") {
+    logger.info(
+      {
+        eventType: body?.event?.type,
+        teamId: body?.team_id,
+      },
+      "Received Slack event callback",
+    );
+    return res.status(200).json({ ok: true });
+  }
+
+  return res.status(200).json({ ok: true });
+});
+
+const port = Number(process.env['PORT'] ?? 3000);
+const host = process.env['HOST'] ?? "0.0.0.0";
+
+app.listen(port, host, () => {
+  logger.info(
+    { env: process.env['NODE_ENV'] ?? "development", host, port },
+    "Meeting-to-Action bridge listening",
+  );
+});
